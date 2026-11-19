@@ -3,6 +3,7 @@
 import io
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -131,8 +132,8 @@ def ping_diagnostics(label, family_flag, target):
         return
 
     output = result.stdout + result.stderr
-    loss_match = __import__("re").search(r"([0-9.]+)% packet loss", output)
-    rtt_match = __import__("re").search(
+    loss_match = re.search(r"([0-9.]+)% packet loss", output)
+    rtt_match = re.search(
         r"(?:round-trip|rtt) min/avg/max(?:/mdev)? = [0-9.]+/([0-9.]+)/", output
     )
     if loss_match:
