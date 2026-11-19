@@ -6,6 +6,9 @@ import platform
 import shutil
 import socket
 import subprocess
+import io
+from contextlib import redirect_stdout
+from pathlib import Path
 from datetime import datetime
 
 
@@ -26,8 +29,7 @@ def system_info():
     try:
         with open("/proc/uptime") as file:
             uptime = float(file.readline().split()[0])
-        hours = int(uptime // 3600)
-        print(f"System uptime: {hours} hours")
+        print(f"System uptime: {int(uptime // 3600)} hours")
     except Exception:
         print("System uptime: Unable to detect")
 
@@ -55,11 +57,9 @@ def resource_usage():
         print("RAM: Unable to detect")
 
     disk = shutil.disk_usage("/")
-    used_percent = (disk.used / disk.total) * 100
-
     print(f"Disk total: {disk.total / (1024**3):.1f} GB")
     print(f"Disk free: {disk.free / (1024**3):.1f} GB")
-    print(f"Disk usage: {used_percent:.1f}%")
+    print(f"Disk usage: {(disk.used / disk.total) * 100:.1f}%")
 
 
 def network_checks():
@@ -76,7 +76,6 @@ def network_checks():
         print("[PASS] DNS resolution")
     except OSError:
         print("[FAIL] DNS resolution")
-
 
 
 def service_checks():
@@ -121,19 +120,69 @@ def service_checks():
         print(f"       Restart count: {restarts}")
 
 
+def log_analysis():
+    heading("ARO LOG ANALYSIS")
+
+    services = ["agent", "rpc"]
+    keywords = ["error", "failed", "failure", "critical", "warning"]
+
+    for service in services:
+        print(f"\nChecking {service} logs...")
+
+        result = subprocess.run(
+            ["journalctl", "-u", service, "-n", "100",
+             "--no-pager", "-o", "cat"],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            print(f"[WARN] Unable to read {service} logs")
+            continue
+
+        matches = [
+            line for line in result.stdout.splitlines()
+            if any(word in line.lower() for word in keywords)
+        ]
+
+        if not matches:
+            print("[PASS] No matching errors or warnings found")
+            continue
+
+        print(f"[WARN] Found {len(matches)} matching log entries")
+
+        for line in matches[-10:]:
+            print(f"  {line}")
+
 
 def main():
-    print("ARO NODE DOCTOR")
-    print(f"Diagnostic date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    output = io.StringIO()
 
-    system_info()
-    resource_usage()
-    network_checks()
-    service_checks()
+    with redirect_stdout(output):
+        print("ARO NODE DOCTOR")
+        print(f"Diagnostic date: {datetime.now()}")
 
-    heading("DIAGNOSTICS COMPLETE")
-    print("ARO Node Doctor finished its checks")
-    print("No system configurations were modified")
+        system_info()
+        resource_usage()
+        network_checks()
+        service_checks()
+        log_analysis()
+
+        heading("DIAGNOSTICS COMPLETE")
+        print("No system configurations were modified")
+
+    report = output.getvalue()
+    print(report)
+
+    report_dir = Path("reports")
+    report_dir.mkdir(exist_ok=True)
+
+    filename = datetime.now().strftime("aro-report-%Y%m%d-%H%M%S.txt")
+    report_path = report_dir / filename
+
+    report_path.write_text(report, encoding="utf-8")
+
+    print(f"Diagnostic report saved: {report_path}")
 
 
 if __name__ == "__main__":
