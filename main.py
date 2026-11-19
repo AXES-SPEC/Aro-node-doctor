@@ -78,10 +78,11 @@ def network_checks():
         print("[FAIL] DNS resolution")
 
 
+
 def service_checks():
     heading("ARO SERVICE CHECKS")
 
-    services = ["agent", "rpc", "frpc"]
+    services = ["agent", "rpc"]
 
     if shutil.which("systemctl") is None:
         print("[SKIP] systemctl is not available")
@@ -89,17 +90,36 @@ def service_checks():
 
     for service in services:
         result = subprocess.run(
-            ["systemctl", "is-active", service],
+            ["systemctl", "show", service, "--no-page",
+             "--property=LoadState,ActiveState,SubState,NRestarts"],
             capture_output=True,
             text=True
         )
 
-        status = result.stdout.strip() or "not found"
+        if result.returncode != 0:
+            print(f"[FAIL] {service}: unable to inspect")
+            continue
 
-        if status == "active":
-            print(f"[PASS] {service}: active")
-        else:
-            print(f"[INFO] {service}: {status}")
+        details = dict(
+            line.split("=", 1)
+            for line in result.stdout.splitlines()
+            if "=" in line
+        )
+
+        load = details.get("LoadState", "unknown")
+        active = details.get("ActiveState", "unknown")
+        sub = details.get("SubState", "unknown")
+        restarts = details.get("NRestarts", "unknown")
+
+        if load == "not-found":
+            print(f"[FAIL] {service}: service not installed")
+            continue
+
+        status = "PASS" if active == "active" else "WARN"
+
+        print(f"[{status}] {service}: {active} ({sub})")
+        print(f"       Restart count: {restarts}")
+
 
 
 def main():
