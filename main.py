@@ -115,23 +115,117 @@ def check_cpu_temperature():
                 "Check ventilation and monitor temperatures under load")
 
 
+def ping_diagnostics(label, family_flag, target):
+    if shutil.which("ping") is None:
+        print(f"[SKIP] {label} packet-loss test: ping is unavailable")
+        return
+    try:
+        result = subprocess.run(
+            ["ping", family_flag, "-c", "5", "-W", "3", target],
+            capture_output=True, text=True, timeout=20
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        print(f"[WARN] {label} ping test could not complete")
+        finding("WARNING", f"{label} ping test could not complete",
+                "Check network connectivity and retry the diagnostic")
+        return
+
+    output = result.stdout + result.stderr
+    loss_match = __import__("re").search(r"([0-9.]+)% packet loss", output)
+    rtt_match = __import__("re").search(
+        r"(?:round-trip|rtt) min/avg/max(?:/mdev)? = [0-9.]+/([0-9.]+)/", output
+    )
+    if loss_match:
+        loss = float(loss_match.group(1))
+        latency = float(rtt_match.group(1)) if rtt_match else None
+        latency_text = f", average latency {latency:.1f} ms" if latency is not None else ""
+        print(f"[INFO] {label}: {loss:.1f}% packet loss{latency_text}")
+        if loss >= 50:
+            finding("CRITICAL", f"{label} packet loss is {loss:.1f}%",
+                    "Check the network link, mobile signal, routing and firewall")
+        elif loss > 0:
+            finding("WARNING", f"{label} packet loss is {loss:.1f}%",
+                    "Monitor connection quality and check for intermittent network issues")
+        if latency is not None and latency >= 1000:
+            finding("WARNING", f"{label} average ping latency is {latency:.1f} ms",
+                    "Check network congestion and signal quality")
+    else:
+        print(f"[WARN] {label} ping result could not be interpreted")
+
+
+def tcp_probe(label, family, sockaddr, port):
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.settimeout(8)
+    started = datetime.now().timestamp()
+    try:
+        sock.connect((sockaddr[0], port) if family == socket.AF_INET else
+                     (sockaddr[0], port, sockaddr[2], sockaddr[3]))
+        latency = (datetime.now().timestamp() - started) * 1000
+        print(f"[PASS] {label}: TCP port {port} reachable ({latency:.1f} ms)")
+        if latency >= 1000:
+            finding("WARNING", f"{label} connection latency is {latency:.1f} ms",
+                    "Check network congestion, routing and mobile signal")
+        return True
+    except OSError as error:
+        print(f"[FAIL] {label}: TCP port {port} unavailable ({error})")
+        return False
+    finally:
+        sock.close()
+
+
 def network_checks():
     heading("NETWORK DIAGNOSTICS")
-    try:
-        connection = socket.create_connection(("1.1.1.1", 443), timeout=5)
-        connection.close()
-        print("[PASS] Internet connectivity")
-    except OSError:
-        print("[FAIL] Internet connectivity")
-        finding("CRITICAL", "Cannot connect to 1.1.1.1 on TCP port 443",
-                "Check the active network connection, gateway and firewall rules")
-    try:
-        socket.gethostbyname("example.com")
-        print("[PASS] DNS resolution")
-    except OSError:
-        print("[FAIL] DNS resolution")
-        finding("WARNING", "DNS lookup for example.com failed",
-                "Check configured DNS servers and network connection")
+
+    # Test general IPv4 and IPv6 reachability independently
+    ping_diagnostics("IPv4 internet", "-4", "1.1.1.1")
+    ping_diagnostics("IPv6 internet", "-6", "2606:4700:4700::1111")
+
+    # DNS resolution for the ARO endpoint, separated by address family
+    aro_host = "ops.aro.network"
+    resolved = {socket.AF_INET: [], socket.AF_INET6: []}
+    for family, label in [(socket.AF_INET, "IPv4"), (socket.AF_INET6, "IPv6")]:
+        try:
+            records = socket.getaddrinfo(aro_host, 30071, family, socket.SOCK_STREAM)
+            seen = set()
+            for record in records:
+                address = record[4]
+                if address[0] not in seen:
+                    resolved[family].append(address)
+                    seen.add(address[0])
+            addresses = ", ".join(item[0] for item in resolved[family])
+            print(f"[PASS] {label} DNS for {aro_host}: {addresses}")
+        except socket.gaierror:
+            print(f"[INFO] No {label} DNS address returned for {aro_host}")
+
+    if not resolved[socket.AF_INET] and not resolved[socket.AF_INET6]:
+        finding("CRITICAL", f"DNS could not resolve {aro_host} to IPv4 or IPv6",
+                "Check DNS servers and network connectivity")
+
+    # Verify ARO's actual FRPC server port on every resolved address
+    if not resolved[socket.AF_INET] and not resolved[socket.AF_INET6]:
+        print("[SKIP] ARO server port test: hostname did not resolve")
+    else:
+        for family, label in [(socket.AF_INET, "ARO IPv4"), (socket.AF_INET6, "ARO IPv6")]:
+            addresses = resolved[family]
+            if not addresses:
+                print(f"[SKIP] {label}: no DNS address available")
+                continue
+            successes = 0
+            for address in addresses:
+                if tcp_probe(label + " " + address[0], family, address, 30071):
+                    successes += 1
+            if successes == 0:
+                finding("CRITICAL", f"ARO server port 30071 is unreachable over {label.split()[-1]}",
+                        "Check routing, firewall rules and ARO server availability")
+
+    # General HTTPS reachability tests distinguish internet access from ARO access
+    for family, label, sockaddr in [
+        (socket.AF_INET, "IPv4 internet TCP", ("1.1.1.1",)),
+        (socket.AF_INET6, "IPv6 internet TCP", ("2606:4700:4700::1111", 0, 0, 0)),
+    ]:
+        if not tcp_probe(label, family, sockaddr, 443):
+            finding("WARNING", f"{label} on port 443 failed",
+                    "Check connectivity for this IP version and the network firewall")
 
 
 def service_checks():
