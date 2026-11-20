@@ -310,23 +310,35 @@ def log_analysis():
 
     for service in ["agent", "rpc"]:
         print(f"\nChecking {service} logs (last 24 hours)...")
+        command = ["journalctl", "-u", service, "--since", "24 hours ago",
+                   "--no-pager", "-o", "short-iso"]
         try:
             result = subprocess.run(
-                ["journalctl", "-u", service, "--since", "24 hours ago",
-                 "--no-pager", "-o", "short-iso"],
-                capture_output=True, text=True, timeout=30
+                command, capture_output=True, text=True, timeout=30
             )
+            # Some systems hide system-service logs from unprivileged users.
+            # Retry without prompting for a password if the first query is empty.
+            if result.returncode == 0 and not result.stdout.strip():
+                if shutil.which("sudo"):
+                    privileged = subprocess.run(
+                        ["sudo", "-n"] + command,
+                        capture_output=True, text=True, timeout=30
+                    )
+                    if privileged.returncode == 0 and privileged.stdout.strip():
+                        result = privileged
         except (OSError, subprocess.TimeoutExpired):
             result = None
         if result is None or result.returncode != 0:
             print(f"[WARN] Unable to read {service} logs")
             finding("WARNING", f"Could not read {service} logs",
-                    "Check journal permissions; appropriate privileges may be required")
+                    "Check journal permissions; run the diagnostic with sudo if needed")
             continue
 
         log_lines = result.stdout.splitlines()
         if not log_lines:
-            print("[INFO] No journal entries found in the last 24 hours")
+            print(f"[INFO] No {service} journal entries were visible to this user in the last 24 hours")
+            finding("WARNING", f"No {service} journal entries could be read",
+                    "Check journal permissions; try running the diagnostic with sudo to confirm whether entries exist")
             continue
 
         if service == "rpc":
