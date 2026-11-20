@@ -328,6 +328,89 @@ def network_checks():
                     "Check connectivity for this IP version and the network firewall")
 
 
+
+def network_interruption_tracking():
+    heading("NETWORK INTERRUPTION TRACKING")
+    if not shutil.which("journalctl"):
+        print("[SKIP] journalctl is unavailable")
+        return
+
+    sources = [
+        ("NetworkManager", ["journalctl", "-u", "NetworkManager", "--since", "24 hours ago", "--no-pager", "-o", "short-iso"]),
+        ("Kernel network", ["journalctl", "-k", "--since", "24 hours ago", "--no-pager", "-o", "short-iso"]),
+    ]
+    events = []
+    source_available = 0
+
+    disconnect_patterns = (
+        "disconnected", "connection lost", "carrier lost", "link is down",
+        "link down", "activation failed", "deactivating", "unavailable",
+        "network is unreachable"
+    )
+    recovery_patterns = (
+        "connected", "connection activated", "carrier acquired",
+        "link is up", "link up", "successfully activated"
+    )
+    network_hint = re.compile(
+        r"(wwan|wwp|wlan|wifi|wireless|ethernet|enp|eno|usb|cdc-wdm|networkmanager|carrier|link)",
+        re.IGNORECASE
+    )
+
+    for label, command in sources:
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                print(f"[WARN] Could not read {label} journal")
+                continue
+            source_available += 1
+            for line in result.stdout.splitlines():
+                if not re.match(r"^\\d{4}-\\d{2}-\\d{2}[T ]", line):
+                    continue
+                lower = line.lower()
+                if not network_hint.search(line):
+                    continue
+                is_disconnect = any(term in lower for term in disconnect_patterns)
+                is_recovery = any(term in lower for term in recovery_patterns)
+                if is_disconnect or is_recovery:
+                    events.append({
+                        "source": label,
+                        "line": line,
+                        "time": journal_timestamp(line),
+                        "kind": "INTERRUPTION" if is_disconnect else "RECOVERY",
+                    })
+        except (OSError, subprocess.TimeoutExpired):
+            print(f"[WARN] {label} journal query did not complete")
+
+    if source_available == 0:
+        print("[WARN] Network event journals could not be read")
+        finding("WARNING", "Could not inspect NetworkManager or kernel network journals",
+                "Run the diagnostic with sudo and ensure the system journal is available")
+        return
+
+    events.sort(key=lambda item: item["time"] or datetime.min.replace(tzinfo=None))
+    interruptions = [item for item in events if item["kind"] == "INTERRUPTION"]
+    recoveries = [item for item in events if item["kind"] == "RECOVERY"]
+    print(f"[INFO] Network interruption-related events (24h): {len(interruptions)}")
+    print(f"[INFO] Network recovery-related events (24h): {len(recoveries)}")
+
+    if events:
+        print("NETWORK EVENT TIMELINE (latest 12 events):")
+        for event in events[-12:]:
+            timestamp = (
+                event["time"].astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+                if event["time"] else "time unavailable"
+            )
+            detail = event["line"].split(": ", 1)[-1]
+            print(f"  [{timestamp}] [{event['source']}] {event['kind']}: {detail}")
+    else:
+        print("[INFO] No matching network interruption or recovery events found")
+
+    if interruptions:
+        finding("WARNING", f"Found {len(interruptions)} network interruption-related journal event(s) in the last 24 hours",
+                "Compare the timestamps above with the RPC failure timeline; some messages may describe brief interface transitions rather than a full internet outage")
+
 def service_checks():
     heading("ARO SERVICE CHECKS")
     if shutil.which("systemctl") is None:
@@ -635,6 +718,7 @@ def main():
         resource_usage()
         network_checks()
         dns_resolver_diagnostics()
+        network_interruption_tracking()
         service_checks()
         log_analysis()
         health_summary()
