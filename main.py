@@ -316,16 +316,24 @@ def log_analysis():
             result = subprocess.run(
                 command, capture_output=True, text=True, timeout=30
             )
-            # Some systems hide system-service logs from unprivileged users.
-            # Retry without prompting for a password if the first query is empty.
-            if result.returncode == 0 and not result.stdout.strip():
-                if shutil.which("sudo"):
-                    privileged = subprocess.run(
-                        ["sudo", "-n"] + command,
-                        capture_output=True, text=True, timeout=30
-                    )
-                    if privileged.returncode == 0 and privileged.stdout.strip():
-                        result = privileged
+            # journalctl may print informational text even when no journal
+            # entries are visible. Only timestamped output lines count as entries.
+            has_entries = any(
+                re.match(r"^\\d{4}-\\d{2}-\\d{2}[T ]", line)
+                for line in result.stdout.splitlines()
+            )
+            # Retry with non-interactive sudo when no actual entries are visible.
+            if result.returncode == 0 and not has_entries and shutil.which("sudo"):
+                privileged = subprocess.run(
+                    ["sudo", "-n"] + command,
+                    capture_output=True, text=True, timeout=30
+                )
+                privileged_has_entries = any(
+                    re.match(r"^\\d{4}-\\d{2}-\\d{2}[T ]", line)
+                    for line in privileged.stdout.splitlines()
+                )
+                if privileged.returncode == 0 and privileged_has_entries:
+                    result = privileged
         except (OSError, subprocess.TimeoutExpired):
             result = None
         if result is None or result.returncode != 0:
