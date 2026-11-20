@@ -202,7 +202,9 @@ def network_checks():
         finding("CRITICAL", f"DNS could not resolve {aro_host} to IPv4 or IPv6",
                 "Check DNS servers and network connectivity")
 
-    # Verify ARO's actual FRPC server port on every resolved address
+    # Verify ARO's actual FRPC server port on every resolved address.
+    # A failure on one IP family is a warning when the other family works.
+    aro_reachability = {}
     if not resolved[socket.AF_INET] and not resolved[socket.AF_INET6]:
         print("[SKIP] ARO server port test: hostname did not resolve")
     else:
@@ -210,14 +212,20 @@ def network_checks():
             addresses = resolved[family]
             if not addresses:
                 print(f"[SKIP] {label}: no DNS address available")
+                aro_reachability[family] = None
                 continue
             successes = 0
             for address in addresses:
                 if tcp_probe(label + " " + address[0], family, address, 30071):
                     successes += 1
-            if successes == 0:
-                finding("CRITICAL", f"ARO server port 30071 is unreachable over {label.split()[-1]}",
-                        "Check routing, firewall rules and ARO server availability")
+            aro_reachability[family] = successes > 0
+
+        any_aro_path_works = any(value is True for value in aro_reachability.values())
+        for family, label in [(socket.AF_INET, "IPv4"), (socket.AF_INET6, "IPv6")]:
+            if aro_reachability.get(family) is False:
+                severity = "WARNING" if any_aro_path_works else "CRITICAL"
+                finding(severity, f"ARO server port 30071 is unreachable over {label}",
+                        "Check this IP family's routing and firewall; another working IP family may still keep ARO connected")
 
     # General HTTPS reachability tests distinguish internet access from ARO access
     for family, label, sockaddr in [
@@ -299,8 +307,41 @@ def log_analysis():
             finding("WARNING", f"Could not read {service} logs",
                     "Check journal permissions; appropriate privileges may be required")
             continue
-        matches = [line for line in result.stdout.splitlines()
+        log_lines = result.stdout.splitlines()
+        matches = [line for line in log_lines
                    if any(word in line.lower() for word in keywords)]
+
+        if service == "rpc":
+            dns_errors = [line for line in log_lines if
+                          ("lookup ops.aro.network" in line.lower() and
+                           ("timeout" in line.lower() or "connection refused" in line.lower()))]
+            tcp_errors = [line for line in log_lines if
+                          ("dial tcp" in line.lower() and
+                           ("timeout" in line.lower() or "connection refused" in line.lower()))]
+            login_successes = [line for line in log_lines if "login to server success" in line.lower()]
+            proxy_successes = [line for line in log_lines if "start proxy success" in line.lower()]
+
+            print(f"[INFO] RPC DNS failures in last 100 entries: {len(dns_errors)}")
+            print(f"[INFO] RPC TCP connection failures in last 100 entries: {len(tcp_errors)}")
+            print(f"[INFO] Successful server logins: {len(login_successes)}")
+            print(f"[INFO] Successful proxy starts: {len(proxy_successes)}")
+
+            if dns_errors or tcp_errors:
+                if login_successes and proxy_successes:
+                    finding("WARNING", "RPC has experienced connection failures but also recovered successfully",
+                            "Monitor DNS and TCP stability; inspect timestamps to see whether failures are becoming more frequent")
+                else:
+                    finding("WARNING", "RPC connection failures were found without a successful recovery in the inspected log window",
+                            "Check DNS resolution, routing and TCP access to ops.aro.network:30071")
+            elif login_successes and proxy_successes:
+                print("[PASS] RPC logs show successful server login and proxy startup, with no matching connection failures")
+            elif not matches:
+                print("[PASS] No matching RPC error keywords found in the last 100 entries")
+
+            for line in matches[-10:]:
+                print(f"  {line}")
+            continue
+
         if not matches:
             print("[PASS] No matching keywords found in the last 100 entries")
             continue
