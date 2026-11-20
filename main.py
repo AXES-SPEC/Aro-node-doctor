@@ -435,14 +435,38 @@ def network_interruption_tracking():
         return
 
     events.sort(key=lambda item: item["time"].timestamp() if item["time"] else float("-inf"))
-    interruptions = [item for item in events if item["kind"] == "INTERRUPTION"]
-    recoveries = [item for item in events if item["kind"] == "RECOVERY"]
-    print(f"[INFO] Confirmed uplink interruption events (24h): {len(interruptions)}")
-    print(f"[INFO] Confirmed uplink recovery events (24h): {len(recoveries)}")
 
-    if events:
+    # Pair state transitions: ignore duplicate CONNECTED_SITE/CONNECTED_GLOBAL
+    # messages and never report a recovery unless an interruption was observed.
+    paired_events = []
+    outage_open = False
+    unmatched_recoveries = 0
+    for event in events:
+        if event["kind"] == "INTERRUPTION":
+            if not outage_open:
+                paired_events.append(event)
+                outage_open = True
+        elif event["kind"] == "RECOVERY":
+            if outage_open:
+                paired_events.append(event)
+                outage_open = False
+            else:
+                unmatched_recoveries += 1
+
+    interruptions = [item for item in paired_events if item["kind"] == "INTERRUPTION"]
+    recoveries = [item for item in paired_events if item["kind"] == "RECOVERY"]
+    print(f"[INFO] Confirmed uplink interruption events (24h): {len(interruptions)}")
+    print(f"[INFO] Matched uplink recovery events (24h): {len(recoveries)}")
+    if unmatched_recoveries:
+        print(f"[INFO] Unmatched/duplicate recovery messages ignored: {unmatched_recoveries}")
+    if outage_open:
+        print("[WARNING] An uplink interruption has no matching recovery event")
+        finding("WARNING", "An uplink interruption has no matching recovery event in the last 24 hours",
+                "Check the latest network event and current connectivity")
+
+    if paired_events:
         print("UPLINK EVENT TIMELINE (latest 12 events):")
-        for event in events[-12:]:
+        for event in paired_events[-12:]:
             timestamp = (
                 event["time"].astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
                 if event["time"] else "time unavailable"
@@ -450,7 +474,7 @@ def network_interruption_tracking():
             detail = event["line"].split(": ", 1)[-1]
             print(f"  [{timestamp}] [{event['source']}] [{event['interface']}] {event['kind']}: {detail}")
     else:
-        print("[PASS] No confirmed default-route interface interruptions found in the last 24 hours")
+        print("[PASS] No complete uplink interruption/recovery pairs found in the last 24 hours")
 
     if interruptions:
         finding("WARNING", f"Found {len(interruptions)} default-route network interruption event(s) in the last 24 hours",
@@ -736,6 +760,51 @@ def log_analysis():
                 "Review the displayed agent entries; keyword matches may include harmless messages")
 
 
+def historical_report_comparison(current_report):
+    """Compare this run with the most recent report saved before this run."""
+    report_dir = Path("reports")
+    previous_reports = sorted(
+        report_dir.glob("aro-report-*.txt"),
+        key=lambda path: path.name,
+        reverse=True
+    )
+    if not previous_reports:
+        heading("HISTORICAL REPORT COMPARISON")
+        print("[INFO] No earlier report found; future runs will be compared here")
+        return
+
+    previous_path = previous_reports[0]
+    try:
+        previous = previous_path.read_text(encoding="utf-8")
+    except OSError as error:
+        heading("HISTORICAL REPORT COMPARISON")
+        print(f"[WARN] Could not read previous report: {error}")
+        return
+
+    def metric(content, pattern):
+        match = re.search(pattern, content, re.IGNORECASE)
+        return match.group(1).strip() if match else "not recorded"
+
+    heading("HISTORICAL REPORT COMPARISON")
+    print(f"Previous report: {previous_path.name}")
+    fields = [
+        ("Overall status", r"Overall status:\s*(.+)"),
+        ("Warnings", r"Warnings:\s*(\d+)"),
+        ("RPC DNS failures", r"RPC DNS failures \(24h\):\s*(\d+)"),
+        ("RPC TCP failures", r"RPC TCP failures \(24h[^)]*\):\s*(\d+)"),
+        ("RPC incident groups", r"Connection incident groups \(10-minute grouping\):\s*(\d+)"),
+        ("Uplink interruptions", r"Confirmed uplink interruption events \(24h\):\s*(\d+)"),
+    ]
+    for label, pattern in fields:
+        old_value = metric(previous, pattern)
+        new_value = metric(current_report, pattern)
+        change = ""
+        if old_value.isdigit() and new_value.isdigit():
+            delta = int(new_value) - int(old_value)
+            change = f" ({delta:+d})"
+        print(f"{label}: {old_value} -> {new_value}{change}")
+
+
 def health_summary():
     heading("HEALTH ASSESSMENT")
     critical = sum(item["severity"] == "CRITICAL" for item in FINDINGS)
@@ -766,6 +835,7 @@ def main():
         network_interruption_tracking()
         service_checks()
         log_analysis()
+        historical_report_comparison(output.getvalue())
         health_summary()
         heading("DIAGNOSTICS COMPLETE")
         print("Read-only mode: no system configurations or services were modified")
