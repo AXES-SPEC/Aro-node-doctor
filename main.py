@@ -174,6 +174,97 @@ def tcp_probe(label, family, sockaddr, port):
         sock.close()
 
 
+
+def dns_resolver_diagnostics():
+    heading("DNS RESOLVER DIAGNOSTICS")
+    resolv_conf = Path("/etc/resolv.conf")
+    nameservers = []
+    try:
+        if resolv_conf.is_symlink():
+            print(f"Resolver configuration link: {os.readlink(resolv_conf)}")
+        else:
+            print("Resolver configuration: /etc/resolv.conf")
+        for line in resolv_conf.read_text(encoding="utf-8").splitlines():
+            fields = line.split("#", 1)[0].split()
+            if len(fields) >= 2 and fields[0] == "nameserver":
+                address = fields[1]
+                if address not in nameservers:
+                    nameservers.append(address)
+    except OSError as error:
+        print(f"[WARN] Cannot read /etc/resolv.conf: {error}")
+        finding("WARNING", "Could not read /etc/resolv.conf",
+                "Check resolver configuration permissions and the system DNS manager")
+
+    if nameservers:
+        print("Configured DNS server(s): " + ", ".join(nameservers))
+    else:
+        print("[WARN] No nameserver entries found in /etc/resolv.conf")
+        finding("WARNING", "No DNS nameserver is configured in /etc/resolv.conf",
+                "Check the DNS settings supplied by NetworkManager or systemd-resolved")
+
+    if shutil.which("systemctl"):
+        for service in ("systemd-resolved", "NetworkManager"):
+            try:
+                result = subprocess.run(
+                    ["systemctl", "is-active", service],
+                    capture_output=True, text=True, timeout=5
+                )
+                state = result.stdout.strip() or "inactive"
+                print(f"{service}: {state}")
+            except (OSError, subprocess.TimeoutExpired):
+                print(f"{service}: status unavailable")
+
+    listeners = []
+    if shutil.which("ss"):
+        try:
+            result = subprocess.run(
+                ["ss", "-H", "-lntu"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                listeners = [
+                    line.strip() for line in result.stdout.splitlines()
+                    if re.search(r":53\\s", line)
+                ]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        print("[INFO] ss is unavailable; local DNS listener check skipped")
+
+    local_servers = {"127.0.0.1", "127.0.0.53", "::1"}
+    configured_local = [server for server in nameservers if server in local_servers]
+    if listeners:
+        print("Local DNS listener(s) on port 53:")
+        for listener in listeners:
+            print(f"  {listener}")
+    elif configured_local:
+        print("[FAIL] A localhost DNS server is configured, but no listener on port 53 was detected")
+        finding("WARNING", "A localhost DNS server is configured without a detected local port 53 listener",
+                "Check whether systemd-resolved or another local DNS resolver is running and listening on the configured address")
+    else:
+        print("[INFO] No local DNS listener detected (not required for an external DNS server)")
+
+    if shutil.which("getent"):
+        try:
+            result = subprocess.run(
+                ["getent", "ahostsv4", "ops.aro.network"],
+                capture_output=True, text=True, timeout=10
+            )
+            addresses = sorted({
+                line.split()[0] for line in result.stdout.splitlines() if line.split()
+            })
+            if result.returncode == 0 and addresses:
+                print("[PASS] System resolver lookup for ops.aro.network: " + ", ".join(addresses))
+            else:
+                print("[FAIL] System resolver could not resolve ops.aro.network")
+                finding("WARNING", "System DNS lookup for ops.aro.network failed",
+                        "Check the configured DNS server, resolver service and network connection")
+        except (OSError, subprocess.TimeoutExpired):
+            print("[WARN] System DNS lookup test could not complete")
+            finding("WARNING", "System DNS lookup test could not complete",
+                    "Check resolver responsiveness and retry the diagnostic")
+    else:
+        print("[SKIP] getent is unavailable; system resolver lookup skipped")
+
 def network_checks():
     heading("NETWORK DIAGNOSTICS")
 
@@ -543,6 +634,7 @@ def main():
         system_info()
         resource_usage()
         network_checks()
+        dns_resolver_diagnostics()
         service_checks()
         log_analysis()
         health_summary()
