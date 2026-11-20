@@ -76,7 +76,7 @@ git pull
 
 ## Safety and limitations
 
-ARO Node Doctor is designed to be read-only. It inspects system information, network state, service status, and logs; it does not restart services, edit configuration files, change firewall rules, or tune the node
+ARO Node Doctor does not modify system or ARO node configuration. It does create a local `reports/` directory and save diagnostic report files. It does not restart services, edit configuration files, change firewall rules, or tune the node
 
 Results are diagnostic indicators, not a guarantee of node performance, uptime, or ARO rewards. Network conditions and journal availability can affect the results
 
