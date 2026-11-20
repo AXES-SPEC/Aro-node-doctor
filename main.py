@@ -309,7 +309,7 @@ def log_analysis():
         return
 
     for service in ["agent", "rpc"]:
-        print(f"\\nChecking {service} logs (last 24 hours)...")
+        print(f"\nChecking {service} logs (last 24 hours)...")
         try:
             result = subprocess.run(
                 ["journalctl", "-u", service, "--since", "24 hours ago",
