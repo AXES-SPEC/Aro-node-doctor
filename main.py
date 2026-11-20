@@ -8,7 +8,7 @@ import shutil
 import socket
 import subprocess
 from contextlib import redirect_stdout
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 FINDINGS = []
@@ -278,7 +278,7 @@ def service_checks():
         else:
             print(f"[PASS] {service}: {active} ({sub})")
             timestamp = details.get("ActiveEnterTimestamp", "")
-            match = re.search(r"(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})", timestamp)
+            match = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", timestamp)
             if match:
                 try:
                     started = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
