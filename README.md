@@ -11,8 +11,9 @@ ARO Node Doctor helps operators identify common system, network, and ARO service
 - CPU, RAM, and disk monitoring
 - Internet connectivity checks
 - DNS resolution tests
-- ARO service status checks
-- ARO service log inspection
+- Separate IPv4 and IPv6 connectivity checks, with family-aware severity
+- ARO service status and restart-count checks
+- RPC log analysis for DNS failures, TCP timeouts, and successful reconnections
 - Diagnostic report generation
 
 ## Supported Systems
