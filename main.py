@@ -342,11 +342,16 @@ def log_analysis():
                     "Check journal permissions; run the diagnostic with sudo if needed")
             continue
 
-        log_lines = result.stdout.splitlines()
+        # Ignore journalctl notices such as "-- No entries --"; only
+        # timestamped journal records are valid input for log analysis.
+        log_lines = [
+            line for line in result.stdout.splitlines()
+            if re.match(r"^\\d{4}-\\d{2}-\\d{2}[T ]", line)
+        ]
         if not log_lines:
-            print(f"[INFO] No {service} journal entries were visible to this user in the last 24 hours")
-            finding("WARNING", f"No {service} journal entries could be read",
-                    "Check journal permissions; try running the diagnostic with sudo to confirm whether entries exist")
+            print(f"[WARN] No readable {service} journal entries were returned")
+            finding("WARNING", f"Could not access readable {service} journal entries",
+                    "Run the diagnostic with sudo (sudo python3 main.py) or grant the user access to the systemd journal")
             continue
 
         if service == "rpc":
