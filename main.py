@@ -838,7 +838,7 @@ def main():
         health_summary()
         historical_report_comparison(output.getvalue())
         heading("DIAGNOSTICS COMPLETE")
-        print("Read-only mode: no system configurations or services were modified")
+        print("System configurations and services were not modified; the diagnostic report is saved locally")
     report = output.getvalue()
     print(report)
     report_dir = Path("reports")
