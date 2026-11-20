@@ -301,6 +301,31 @@ def service_checks():
             pass
 
 
+def journal_timestamp(line):
+    """Parse the timestamp at the start of a journal short-iso line."""
+    match = re.match(
+        r"^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:[+-]\\d{2}:\\d{2}|Z)?)",
+        line
+    )
+    if not match:
+        return None
+    try:
+        return datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def format_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
 def log_analysis():
     heading("ARO LOG ANALYSIS")
     if shutil.which("journalctl") is None:
@@ -355,43 +380,128 @@ def log_analysis():
             continue
 
         if service == "rpc":
-            dns_errors = [line for line in log_lines if
-                          "lookup ops.aro.network" in line.lower() and
-                          ("timeout" in line.lower() or "connection refused" in line.lower())]
-            tcp_errors = [line for line in log_lines if
-                          "dial tcp" in line.lower() and
-                          ("timeout" in line.lower() or "connection refused" in line.lower())]
-            login_successes = [line for line in log_lines if "login to server success" in line.lower()]
-            proxy_successes = [line for line in log_lines if "start proxy success" in line.lower()]
-            failures = dns_errors + tcp_errors
-            failure_positions = [i for i, line in enumerate(log_lines)
-                                 if line in failures]
-            success_positions = [i for i, line in enumerate(log_lines)
-                                 if "start proxy success" in line.lower() or
-                                 "login to server success" in line.lower()]
-            recovered = bool(failure_positions and success_positions and
-                             max(success_positions) > max(failure_positions))
+            login_successes = [
+                line for line in log_lines
+                if "login to server success" in line.lower()
+            ]
+            proxy_successes = [
+                line for line in log_lines
+                if "start proxy success" in line.lower()
+            ]
 
-            print(f"[INFO] RPC DNS failures (24h): {len(dns_errors)}")
-            print(f"[INFO] RPC TCP connection failures (24h): {len(tcp_errors)}")
+            failures = []
+            for line in log_lines:
+                lower = line.lower()
+                if not any(word in lower for word in
+                           ("timeout", "connection refused", "network is unreachable")):
+                    continue
+                if "lookup ops.aro.network" in lower:
+                    category = "DNS"
+                elif "dial tcp" in lower:
+                    category = "TCP"
+                else:
+                    continue
+                failures.append({
+                    "line": line,
+                    "time": journal_timestamp(line),
+                    "category": category,
+                })
+
+            dns_count = sum(item["category"] == "DNS" for item in failures)
+            tcp_count = sum(item["category"] == "TCP" for item in failures)
+            success_events = [
+                {"line": line, "time": journal_timestamp(line)}
+                for line in proxy_successes
+            ]
+            success_events = [item for item in success_events if item["time"] is not None]
+
+            print(f"[INFO] RPC DNS failures (24h): {dns_count}")
+            print(f"[INFO] RPC TCP failures (24h, excluding DNS lookup errors): {tcp_count}")
             print(f"[INFO] Successful server logins (24h): {len(login_successes)}")
             print(f"[INFO] Successful proxy starts (24h): {len(proxy_successes)}")
 
-            if failures:
-                if recovered:
-                    print("[INFO] RPC recorded a successful login/proxy start after its latest detected connection failure")
-                    finding("WARNING", "RPC experienced connection failures in the last 24 hours but later recovered",
-                            "Monitor whether DNS or TCP failures repeat; current connectivity checks help confirm present reachability")
+            # Group repeated retries into one incident when failures are no
+            # more than ten minutes apart. This avoids treating every retry
+            # as a separate outage.
+            episodes = []
+            for event in failures:
+                event_time = event["time"]
+                if not episodes or event_time is None or episodes[-1]["last_time"] is None:
+                    episodes.append({
+                        "first_time": event_time,
+                        "last_time": event_time,
+                        "events": [event],
+                    })
+                    continue
+                gap = (event_time - episodes[-1]["last_time"]).total_seconds()
+                if 0 <= gap <= 600:
+                    episodes[-1]["last_time"] = event_time
+                    episodes[-1]["events"].append(event)
                 else:
-                    finding("WARNING", "RPC connection failures were found without a later successful recovery in the last 24 hours",
-                            "Check DNS resolution, routing and TCP access to ops.aro.network:30071")
+                    episodes.append({
+                        "first_time": event_time,
+                        "last_time": event_time,
+                        "events": [event],
+                    })
+
+            recovered_episodes = []
+            unresolved_episodes = []
+            for episode in episodes:
+                recovery = next(
+                    (item for item in success_events
+                     if episode["last_time"] is not None and item["time"] > episode["last_time"]),
+                    None
+                )
+                episode["recovery"] = recovery
+                if recovery and episode["first_time"] is not None:
+                    episode["duration"] = (
+                        recovery["time"] - episode["first_time"]
+                    ).total_seconds()
+                    recovered_episodes.append(episode)
+                else:
+                    episode["duration"] = None
+                    unresolved_episodes.append(episode)
+
+            print(f"[INFO] Connection incident groups (10-minute grouping): {len(episodes)}")
+            print(f"[INFO] Incidents followed by proxy recovery: {len(recovered_episodes)}")
+            print(f"[INFO] Incidents without a later proxy recovery: {len(unresolved_episodes)}")
+
+            durations = [episode["duration"] for episode in recovered_episodes]
+            if durations:
+                average = sum(durations) / len(durations)
+                print(f"[INFO] Average incident-to-proxy-recovery time: {format_duration(average)}")
+                print(f"[INFO] Longest incident-to-proxy-recovery time: {format_duration(max(durations))}")
+            else:
+                print("[INFO] Recovery duration unavailable; no timestamped recovered incidents found")
+
+            if failures:
+                print("\nRPC FAILURE TIMELINE (latest 10 events):")
+                for event in failures[-10:]:
+                    timestamp = event["time"].astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if event["time"] else "time unavailable"
+                    detail = event["line"].split(": ", 1)[-1]
+                    print(f"  [{timestamp}] {event['category']}: {detail}")
+
+                print("\nRPC INCIDENT SUMMARY:")
+                for index, episode in enumerate(episodes[-10:], 1):
+                    first = episode["first_time"]
+                    last = episode["last_time"]
+                    first_text = first.astimezone().strftime("%m-%d %H:%M:%S") if first else "unknown"
+                    last_text = last.astimezone().strftime("%H:%M:%S") if last else "unknown"
+                    categories = sorted({event["category"] for event in episode["events"]})
+                    label = "/".join(categories)
+                    if episode["recovery"]:
+                        recovered_at = episode["recovery"]["time"].astimezone().strftime("%H:%M:%S")
+                        duration = format_duration(episode["duration"])
+                        print(f"  {index}. {first_text}–{last_text} ({label}, {len(episode['events'])} failures) -> proxy recovered {recovered_at} ({duration})")
+                    else:
+                        print(f"  {index}. {first_text}–{last_text} ({label}, {len(episode['events'])} failures) -> no later proxy recovery found")
+
+                finding("WARNING", f"RPC recorded {len(failures)} connection failures across {len(episodes)} incident group(s) in the last 24 hours",
+                        "Review the failure timeline and incident durations; investigate repeated DNS lookup timeouts and TCP timeouts even if the proxy later recovers")
             elif login_successes and proxy_successes:
                 print("[PASS] RPC logs show successful login and proxy startup, with no detected DNS/TCP connection failures")
             else:
                 print("[INFO] No matching RPC connection or recovery events found in the last 24 hours; this is not proof of a failure")
-
-            for line in (dns_errors + tcp_errors)[-10:]:
-                print(f"  {line}")
             continue
 
         keywords = ["error", "failed", "failure", "critical", "warning"]
