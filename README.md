@@ -12,8 +12,9 @@ ARO Node Doctor helps operators identify common system, network, and ARO service
 - Internet connectivity checks
 - DNS resolution tests
 - Separate IPv4 and IPv6 connectivity checks, with family-aware severity
-- ARO service status and restart-count checks
-- RPC log analysis for DNS failures, TCP timeouts, and successful reconnections
+- ARO service status, active uptime, and historical restart counts
+- 24-hour agent and RPC log analysis for DNS failures, TCP timeouts, and successful reconnections
+- Health scoring that does not warn solely because of an old systemd restart
 - Diagnostic report generation
 
 ## Supported Systems
