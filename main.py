@@ -8,7 +8,7 @@ import shutil
 import socket
 import subprocess
 from contextlib import redirect_stdout
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 FINDINGS = []
@@ -248,7 +248,7 @@ def service_checks():
         try:
             result = subprocess.run(
                 ["systemctl", "show", service, "--no-page",
-                 "--property=LoadState,ActiveState,SubState,NRestarts"],
+                 "--property=LoadState,ActiveState,SubState,NRestarts,ActiveEnterTimestamp"],
                 capture_output=True, text=True, timeout=10
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -277,11 +277,26 @@ def service_checks():
                     f"Inspect {service} logs and configuration before attempting a restart")
         else:
             print(f"[PASS] {service}: {active} ({sub})")
-        print(f"       Restart count: {restarts}")
+            timestamp = details.get("ActiveEnterTimestamp", "")
+            match = re.search(r"(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})", timestamp)
+            if match:
+                try:
+                    started = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+                    elapsed = datetime.now() - started
+                    seconds = max(0, int(elapsed.total_seconds()))
+                    days, remainder = divmod(seconds, 86400)
+                    hours, remainder = divmod(remainder, 3600)
+                    minutes = remainder // 60
+                    uptime = f"{days}d {hours}h {minutes}m" if days else f"{hours}h {minutes}m"
+                    print(f"       Service uptime: {uptime}")
+                except ValueError:
+                    print("       Service uptime: Unable to parse systemd timestamp")
+            else:
+                print("       Service uptime: Not available")
+        print(f"       Restart count (systemd): {restarts}")
         try:
             if int(restarts) > 0:
-                finding("WARNING", f"{service} has restarted {restarts} time(s) since systemd began tracking it",
-                        f"Review recent {service} logs for recurring issues")
+                print("       [INFO] Restart count is historical; recent log events determine whether it needs attention")
         except ValueError:
             pass
 
@@ -292,13 +307,14 @@ def log_analysis():
         print("[SKIP] journalctl is not available")
         finding("WARNING", "journalctl is unavailable", "Use a systemd-based Linux system to inspect service logs")
         return
-    keywords = ["error", "failed", "failure", "critical", "warning"]
+
     for service in ["agent", "rpc"]:
-        print(f"\nChecking {service} logs...")
+        print(f"\\nChecking {service} logs (last 24 hours)...")
         try:
             result = subprocess.run(
-                ["journalctl", "-u", service, "-n", "100", "--no-pager", "-o", "cat"],
-                capture_output=True, text=True, timeout=15
+                ["journalctl", "-u", service, "--since", "24 hours ago",
+                 "--no-pager", "-o", "short-iso"],
+                capture_output=True, text=True, timeout=30
             )
         except (OSError, subprocess.TimeoutExpired):
             result = None
@@ -307,49 +323,63 @@ def log_analysis():
             finding("WARNING", f"Could not read {service} logs",
                     "Check journal permissions; appropriate privileges may be required")
             continue
+
         log_lines = result.stdout.splitlines()
-        matches = [line for line in log_lines
-                   if any(word in line.lower() for word in keywords)]
+        if not log_lines:
+            print("[INFO] No journal entries found in the last 24 hours")
+            continue
 
         if service == "rpc":
             dns_errors = [line for line in log_lines if
-                          ("lookup ops.aro.network" in line.lower() and
-                           ("timeout" in line.lower() or "connection refused" in line.lower()))]
+                          "lookup ops.aro.network" in line.lower() and
+                          ("timeout" in line.lower() or "connection refused" in line.lower())]
             tcp_errors = [line for line in log_lines if
-                          ("dial tcp" in line.lower() and
-                           ("timeout" in line.lower() or "connection refused" in line.lower()))]
+                          "dial tcp" in line.lower() and
+                          ("timeout" in line.lower() or "connection refused" in line.lower())]
             login_successes = [line for line in log_lines if "login to server success" in line.lower()]
             proxy_successes = [line for line in log_lines if "start proxy success" in line.lower()]
+            failures = dns_errors + tcp_errors
+            failure_positions = [i for i, line in enumerate(log_lines)
+                                 if line in failures]
+            success_positions = [i for i, line in enumerate(log_lines)
+                                 if "start proxy success" in line.lower() or
+                                 "login to server success" in line.lower()]
+            recovered = bool(failure_positions and success_positions and
+                             max(success_positions) > max(failure_positions))
 
-            print(f"[INFO] RPC DNS failures in last 100 entries: {len(dns_errors)}")
-            print(f"[INFO] RPC TCP connection failures in last 100 entries: {len(tcp_errors)}")
-            print(f"[INFO] Successful server logins: {len(login_successes)}")
-            print(f"[INFO] Successful proxy starts: {len(proxy_successes)}")
+            print(f"[INFO] RPC DNS failures (24h): {len(dns_errors)}")
+            print(f"[INFO] RPC TCP connection failures (24h): {len(tcp_errors)}")
+            print(f"[INFO] Successful server logins (24h): {len(login_successes)}")
+            print(f"[INFO] Successful proxy starts (24h): {len(proxy_successes)}")
 
-            if dns_errors or tcp_errors:
-                if login_successes and proxy_successes:
-                    finding("WARNING", "RPC has experienced connection failures but also recovered successfully",
-                            "Monitor DNS and TCP stability; inspect timestamps to see whether failures are becoming more frequent")
+            if failures:
+                if recovered:
+                    print("[INFO] RPC recorded a successful login/proxy start after its latest detected connection failure")
+                    finding("WARNING", "RPC experienced connection failures in the last 24 hours but later recovered",
+                            "Monitor whether DNS or TCP failures repeat; current connectivity checks help confirm present reachability")
                 else:
-                    finding("WARNING", "RPC connection failures were found without a successful recovery in the inspected log window",
+                    finding("WARNING", "RPC connection failures were found without a later successful recovery in the last 24 hours",
                             "Check DNS resolution, routing and TCP access to ops.aro.network:30071")
             elif login_successes and proxy_successes:
-                print("[PASS] RPC logs show successful server login and proxy startup, with no matching connection failures")
-            elif not matches:
-                print("[PASS] No matching RPC error keywords found in the last 100 entries")
+                print("[PASS] RPC logs show successful login and proxy startup, with no detected DNS/TCP connection failures")
+            else:
+                print("[INFO] No matching RPC connection or recovery events found in the last 24 hours; this is not proof of a failure")
 
-            for line in matches[-10:]:
+            for line in (dns_errors + tcp_errors)[-10:]:
                 print(f"  {line}")
             continue
 
+        keywords = ["error", "failed", "failure", "critical", "warning"]
+        matches = [line for line in log_lines
+                   if any(word in line.lower() for word in keywords)]
         if not matches:
-            print("[PASS] No matching keywords found in the last 100 entries")
+            print("[PASS] No diagnostic keywords found in agent logs during the last 24 hours")
             continue
-        print(f"[WARN] Found {len(matches)} log entries containing diagnostic keywords")
+        print(f"[WARN] Found {len(matches)} agent log entries containing diagnostic keywords")
         for line in matches[-10:]:
             print(f"  {line}")
-        finding("WARNING", f"{service} logs contain {len(matches)} entries with diagnostic keywords",
-                f"Review the displayed {service} entries; keyword matches may include harmless messages")
+        finding("WARNING", f"Agent logs contain {len(matches)} entries with diagnostic keywords in the last 24 hours",
+                "Review the displayed agent entries; keyword matches may include harmless messages")
 
 
 def health_summary():
