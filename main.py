@@ -223,7 +223,7 @@ def dns_resolver_diagnostics():
             if result.returncode == 0:
                 listeners = [
                     line.strip() for line in result.stdout.splitlines()
-                    if re.search(r":53\\s", line)
+                    if re.search(r":53\s", line)
                 ]
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -392,12 +392,12 @@ def network_interruption_tracking():
                     )
                     device_disconnect = relevant_device and (
                         "carrier: link disconnected" in lower
-                        or bool(re.search(r"state change: [^\\n]*-> disconnected", lower))
+                        or bool(re.search(r"state change: [^\n]*-> disconnected", lower))
                         or "state change: activated -> deactivating" in lower
                     )
                     device_recovery = relevant_device and (
                         "carrier: link connected" in lower
-                        or bool(re.search(r"state change: [^\\n]*-> activated", lower))
+                        or bool(re.search(r"state change: [^\n]*-> activated", lower))
                     )
                     is_disconnect = global_disconnect or device_disconnect
                     is_recovery = global_recovery or device_recovery
@@ -547,7 +547,7 @@ def service_checks():
 def journal_timestamp(line):
     """Parse the timestamp at the start of a journal short-iso line."""
     match = re.match(
-        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\\d{2}:\\d{2}|Z)?)",
+        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?)",
         line
     )
     if not match:
