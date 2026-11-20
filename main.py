@@ -319,7 +319,7 @@ def log_analysis():
             # journalctl may print informational text even when no journal
             # entries are visible. Only timestamped output lines count as entries.
             has_entries = any(
-                re.match(r"^\\d{4}-\\d{2}-\\d{2}[T ]", line)
+                re.match(r"^\d{4}-\d{2}-\d{2}[T ]", line)
                 for line in result.stdout.splitlines()
             )
             # Retry with non-interactive sudo when no actual entries are visible.
@@ -329,7 +329,7 @@ def log_analysis():
                     capture_output=True, text=True, timeout=30
                 )
                 privileged_has_entries = any(
-                    re.match(r"^\\d{4}-\\d{2}-\\d{2}[T ]", line)
+                    re.match(r"^\d{4}-\d{2}-\d{2}[T ]", line)
                     for line in privileged.stdout.splitlines()
                 )
                 if privileged.returncode == 0 and privileged_has_entries:
@@ -346,7 +346,7 @@ def log_analysis():
         # timestamped journal records are valid input for log analysis.
         log_lines = [
             line for line in result.stdout.splitlines()
-            if re.match(r"^\\d{4}-\\d{2}-\\d{2}[T ]", line)
+            if re.match(r"^\d{4}-\d{2}-\d{2}[T ]", line)
         ]
         if not log_lines:
             print(f"[WARN] No readable {service} journal entries were returned")
