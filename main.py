@@ -366,7 +366,7 @@ def network_interruption_tracking():
                 continue
             source_available += 1
             for line in result.stdout.splitlines():
-                if not re.match(r"^\\d{4}-\\d{2}-\\d{2}[T ]", line):
+                if not re.match(r"^\d{4}-\d{2}-\d{2}[T ]", line):
                     continue
                 lower = line.lower()
                 if not network_hint.search(line):
@@ -389,7 +389,7 @@ def network_interruption_tracking():
                 "Run the diagnostic with sudo and ensure the system journal is available")
         return
 
-    events.sort(key=lambda item: item["time"] or datetime.min.replace(tzinfo=None))
+    events.sort(key=lambda item: item["time"].timestamp() if item["time"] else float("-inf"))
     interruptions = [item for item in events if item["kind"] == "INTERRUPTION"]
     recoveries = [item for item in events if item["kind"] == "RECOVERY"]
     print(f"[INFO] Network interruption-related events (24h): {len(interruptions)}")
