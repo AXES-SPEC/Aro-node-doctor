@@ -304,7 +304,7 @@ def service_checks():
 def journal_timestamp(line):
     """Parse the timestamp at the start of a journal short-iso line."""
     match = re.match(
-        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\\.\\d+)?(?:[+-]\\d{2}:\\d{2}|Z)?)",
+        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\\d{2}:\\d{2}|Z)?)",
         line
     )
     if not match:
