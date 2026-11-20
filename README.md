@@ -1,62 +1,89 @@
-
 # ARO Node Doctor
 
-A lightweight diagnostic and monitoring toolkit for ARO Network node operators
+A lightweight, read-only diagnostic tool for ARO Network node operators running Linux
 
-ARO Node Doctor helps operators identify common system, network, and ARO service issues through simple diagnostic checks
+ARO Node Doctor checks the host system, network connectivity, DNS resolution, ARO services, and recent service logs. It produces a health assessment and saves a timestamped report for later comparison
 
 ## Features
 
-- System information and resource usage
-- CPU, RAM, and disk monitoring
-- Internet connectivity checks
-- DNS resolution tests
-- Separate IPv4 and IPv6 connectivity checks, with family-aware severity
-- ARO service status, active uptime, and historical restart counts
-- 24-hour agent and RPC log analysis for DNS failures, TCP timeouts, and successful reconnections
-- Health scoring that does not warn solely because of an old systemd restart
-- Diagnostic report generation
+### System health
+- Operating system, architecture, Python version, and system uptime
+- CPU load, RAM usage, root disk usage, and available thermal readings
+- Configurable warning and critical thresholds built into the diagnostic checks
 
-## Supported Systems
+### Network and DNS
+- Separate IPv4 and IPv6 internet connectivity checks
+- DNS resolution for `ops.aro.network`
+- TCP reachability checks for ARO port `30071` and HTTPS port `443`
+- DNS resolver configuration and local listener checks
+- Default-route interface tracking to help identify uplink interruptions
 
-- Debian 13
-- Ubuntu
-- Other Debian-based Linux distributions (planned)
+### ARO services and logs
+- `agent` and `rpc` systemd service status and uptime
+- Historical systemd restart counts
+- Last 24 hours of agent and RPC journal logs
+- RPC DNS and TCP connection failure counts
+- Grouped RPC incidents, successful proxy recoveries, and recovery durations
+
+### Reports
+- Overall health assessment with findings and recommendations
+- Timestamped text reports saved in the `reports/` directory
+- Comparison with the most recent previous report
 
 ## Requirements
 
-- Python 3.9+
-- Linux operating system
-- systemd
+- Linux with systemd
+- Python 3.9 or newer
+- ARO node services named `agent` and `rpc`
+- Common system utilities: `ip`, `ping`, `ss`, `getent`, and `journalctl`
+
+Some checks are skipped when their required system utility or data source is unavailable
 
 ## Installation
 
 Clone the repository:
 
-    git clone https://github.com/AXES-SPEC/Aro-node-doctor.git
+```bash
+git clone https://github.com/AXES-SPEC/Aro-node-doctor.git
+cd Aro-node-doctor
+```
 
-Enter the project directory:
+## Run
 
-    cd Aro-node-doctor
+Run with sudo to allow access to system and service journal logs:
 
-Run the diagnostic tool:
+```bash
+sudo python3 main.py
+```
 
-    python3 main.py
+The tool does not require third-party Python packages
 
-## Safety
+Reports are written to:
 
-ARO Node Doctor is designed to be read-only
+```
+reports/aro-report-YYYYMMDD-HHMMSS.txt
+```
 
-It does not automatically restart services, modify configurations, or change firewall settings
+Run the command again later to compare the latest diagnostic results with the previous saved report
 
-## Project Status
+## Update
 
-🚧 Under development
+Pull the latest version from GitHub:
 
-## Contributions
+```bash
+git pull
+```
 
-Contributions, bug reports, and feature suggestions are welcome
+## Safety and limitations
+
+ARO Node Doctor is designed to be read-only. It inspects system information, network state, service status, and logs; it does not restart services, edit configuration files, change firewall rules, or tune the node
+
+Results are diagnostic indicators, not a guarantee of node performance, uptime, or ARO rewards. Network conditions and journal availability can affect the results
+
+## Project status
+
+Under active development. Feedback, bug reports, and contributions are welcome
 
 ## Disclaimer
 
-This is an independent community tool and is not an official ARO Network product
+ARO Node Doctor is an independent community project and is not an official ARO Network product
