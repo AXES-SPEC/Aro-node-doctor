@@ -335,6 +335,26 @@ def network_interruption_tracking():
         print("[SKIP] journalctl is unavailable")
         return
 
+    # Identify the interface carrying the default route so Docker bridges,
+    # veth pairs and unrelated Wi-Fi transitions are not counted as outages.
+    active_interfaces = set()
+    if shutil.which("ip"):
+        for args in (["ip", "-o", "route", "show", "default"],
+                     ["ip", "-o", "-6", "route", "show", "default"]):
+            try:
+                route = subprocess.run(args, capture_output=True, text=True, timeout=5)
+                for line in route.stdout.splitlines():
+                    match = re.search(r"\bdev\s+(\S+)", line)
+                    if match:
+                        active_interfaces.add(match.group(1))
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    if active_interfaces:
+        print("Default-route interface(s): " + ", ".join(sorted(active_interfaces)))
+    else:
+        print("[INFO] Default-route interface could not be identified; using global NetworkManager state events only")
+
     sources = [
         ("NetworkManager", ["journalctl", "-u", "NetworkManager", "--since", "24 hours ago", "--no-pager", "-o", "short-iso"]),
         ("Kernel network", ["journalctl", "-k", "--since", "24 hours ago", "--no-pager", "-o", "short-iso"]),
@@ -342,40 +362,65 @@ def network_interruption_tracking():
     events = []
     source_available = 0
 
-    disconnect_patterns = (
-        "disconnected", "connection lost", "carrier lost", "link is down",
-        "link down", "activation failed", "deactivating", "unavailable",
-        "network is unreachable"
-    )
-    recovery_patterns = (
-        "connected", "connection activated", "carrier acquired",
-        "link is up", "link up", "successfully activated"
-    )
-    network_hint = re.compile(
-        r"(wwan|wwp|wlan|wifi|wireless|ethernet|enp|eno|usb|cdc-wdm|networkmanager|carrier|link)",
-        re.IGNORECASE
-    )
-
     for label, command in sources:
         try:
-            result = subprocess.run(
-                command, capture_output=True, text=True, timeout=30
-            )
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
                 print(f"[WARN] Could not read {label} journal")
                 continue
             source_available += 1
+
             for line in result.stdout.splitlines():
                 if not re.match(r"^\d{4}-\d{2}-\d{2}[T ]", line):
                     continue
+
                 lower = line.lower()
-                if not network_hint.search(line):
-                    continue
-                is_disconnect = any(term in lower for term in disconnect_patterns)
-                is_recovery = any(term in lower for term in recovery_patterns)
+                interface_match = re.search(r"device \(([^)]+)\)", line)
+                interface = interface_match.group(1) if interface_match else None
+
+                if label == "NetworkManager":
+                    # Global manager state changes represent system-wide connectivity.
+                    global_disconnect = "manager: networkmanager state is now disconnected" in lower
+                    global_recovery = (
+                        "manager: networkmanager state is now connected_global" in lower
+                        or "manager: networkmanager state is now connected_site" in lower
+                    )
+                    # Device events count only for the active default-route interface.
+                    relevant_device = (
+                        interface is not None
+                        and (not active_interfaces or interface in active_interfaces)
+                    )
+                    device_disconnect = relevant_device and (
+                        "carrier: link disconnected" in lower
+                        or bool(re.search(r"state change: [^\\n]*-> disconnected", lower))
+                        or "state change: activated -> deactivating" in lower
+                    )
+                    device_recovery = relevant_device and (
+                        "carrier: link connected" in lower
+                        or bool(re.search(r"state change: [^\\n]*-> activated", lower))
+                    )
+                    is_disconnect = global_disconnect or device_disconnect
+                    is_recovery = global_recovery or device_recovery
+                else:
+                    # Kernel messages are limited to the active uplink interface.
+                    if not interface_match:
+                        continue
+                    relevant_device = (
+                        not active_interfaces or interface in active_interfaces
+                    )
+                    if not relevant_device:
+                        continue
+                    is_disconnect = bool(re.search(
+                        r"(?:link is down|link down|carrier lost|carrier off)", lower
+                    ))
+                    is_recovery = bool(re.search(
+                        r"(?:link is up|link up|carrier acquired|carrier on)", lower
+                    ))
+
                 if is_disconnect or is_recovery:
                     events.append({
                         "source": label,
+                        "interface": interface or "system",
                         "line": line,
                         "time": journal_timestamp(line),
                         "kind": "INTERRUPTION" if is_disconnect else "RECOVERY",
@@ -392,24 +437,24 @@ def network_interruption_tracking():
     events.sort(key=lambda item: item["time"].timestamp() if item["time"] else float("-inf"))
     interruptions = [item for item in events if item["kind"] == "INTERRUPTION"]
     recoveries = [item for item in events if item["kind"] == "RECOVERY"]
-    print(f"[INFO] Network interruption-related events (24h): {len(interruptions)}")
-    print(f"[INFO] Network recovery-related events (24h): {len(recoveries)}")
+    print(f"[INFO] Confirmed uplink interruption events (24h): {len(interruptions)}")
+    print(f"[INFO] Confirmed uplink recovery events (24h): {len(recoveries)}")
 
     if events:
-        print("NETWORK EVENT TIMELINE (latest 12 events):")
+        print("UPLINK EVENT TIMELINE (latest 12 events):")
         for event in events[-12:]:
             timestamp = (
                 event["time"].astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
                 if event["time"] else "time unavailable"
             )
             detail = event["line"].split(": ", 1)[-1]
-            print(f"  [{timestamp}] [{event['source']}] {event['kind']}: {detail}")
+            print(f"  [{timestamp}] [{event['source']}] [{event['interface']}] {event['kind']}: {detail}")
     else:
-        print("[INFO] No matching network interruption or recovery events found")
+        print("[PASS] No confirmed default-route interface interruptions found in the last 24 hours")
 
     if interruptions:
-        finding("WARNING", f"Found {len(interruptions)} network interruption-related journal event(s) in the last 24 hours",
-                "Compare the timestamps above with the RPC failure timeline; some messages may describe brief interface transitions rather than a full internet outage")
+        finding("WARNING", f"Found {len(interruptions)} default-route network interruption event(s) in the last 24 hours",
+                "Compare these timestamps with the RPC failure timeline; a link transition does not always mean the entire internet connection was unavailable")
 
 def service_checks():
     heading("ARO SERVICE CHECKS")
