@@ -16,7 +16,7 @@ ARO Node Doctor checks the host system, network connectivity, DNS resolution, AR
 - DNS resolution for `ops.aro.network`
 - TCP reachability checks for ARO port `30071` and HTTPS port `443`
 - DNS resolver configuration and local listener checks
-- Default-route interface tracking to help identify uplink interruptions
+- Current default-route and physical uplink event tracking to help identify interruptions, including after an interface change
 
 ### ARO services and logs
 - `agent` and `rpc` systemd service status and uptime
