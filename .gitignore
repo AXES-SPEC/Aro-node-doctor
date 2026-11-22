@@ -1,0 +1,6 @@
+# Python bytecode and cache directories
+__pycache__/
+*.py[cod]
+
+# Local diagnostic reports (keep reports on the operator's machine)
+reports/
