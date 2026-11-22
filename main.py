@@ -356,9 +356,20 @@ def network_interruption_tracking():
     else:
         print("[INFO] Default-route interface could not be identified; using global NetworkManager state events and physical uplink candidates")
 
+    active_prefixes = tuple({
+        match.group(1)
+        for name in active_interfaces
+        if (match := re.match(r"([a-zA-Z]+)", name))
+    })
+
     def is_uplink_candidate(name):
-        # Include physical NICs and modem interfaces even if they are no
-        # longer the current default route. Exclude common virtual interfaces.
+        # Include the current uplink and historical interfaces from the same
+        # naming family, without counting unrelated Wi-Fi/Ethernet devices.
+        if name in active_interfaces:
+            return True
+        if active_prefixes:
+            return name.startswith(active_prefixes)
+        # If no route is available, fall back to non-virtual interfaces.
         virtual_prefixes = (
             "lo", "docker", "veth", "br-", "virbr", "tun", "tap",
             "wg", "p2p-dev-", "ifb", "cni", "flannel",
@@ -395,7 +406,7 @@ def network_interruption_tracking():
                         "manager: networkmanager state is now connected_global" in lower
                         or "manager: networkmanager state is now connected_site" in lower
                     )
-                    # Device events count only for the active default-route interface.
+                    # Device events include the active uplink and its historical interface family.
                     relevant_device = (
                         interface is not None
                         and (interface in active_interfaces or is_uplink_candidate(interface))
@@ -412,7 +423,7 @@ def network_interruption_tracking():
                     is_disconnect = global_disconnect or device_disconnect
                     is_recovery = global_recovery or device_recovery
                 else:
-                    # Kernel messages are limited to the active uplink interface.
+                    # Kernel messages are limited to the active uplink and its interface family.
                     if not interface_match:
                         continue
                     relevant_device = (
