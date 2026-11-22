@@ -351,9 +351,19 @@ def network_interruption_tracking():
                 pass
 
     if active_interfaces:
-        print("Default-route interface(s): " + ", ".join(sorted(active_interfaces)))
+        print("Current default-route interface(s): " + ", ".join(sorted(active_interfaces)))
+        print("[INFO] Historical checks also include physical uplink candidates to catch interface changes")
     else:
-        print("[INFO] Default-route interface could not be identified; using global NetworkManager state events only")
+        print("[INFO] Default-route interface could not be identified; using global NetworkManager state events and physical uplink candidates")
+
+    def is_uplink_candidate(name):
+        # Include physical NICs and modem interfaces even if they are no
+        # longer the current default route. Exclude common virtual interfaces.
+        virtual_prefixes = (
+            "lo", "docker", "veth", "br-", "virbr", "tun", "tap",
+            "wg", "p2p-dev-", "ifb", "cni", "flannel",
+        )
+        return not name.startswith(virtual_prefixes)
 
     sources = [
         ("NetworkManager", ["journalctl", "-u", "NetworkManager", "--since", "24 hours ago", "--no-pager", "-o", "short-iso"]),
@@ -388,7 +398,7 @@ def network_interruption_tracking():
                     # Device events count only for the active default-route interface.
                     relevant_device = (
                         interface is not None
-                        and (not active_interfaces or interface in active_interfaces)
+                        and (interface in active_interfaces or is_uplink_candidate(interface))
                     )
                     device_disconnect = relevant_device and (
                         "carrier: link disconnected" in lower
@@ -406,7 +416,7 @@ def network_interruption_tracking():
                     if not interface_match:
                         continue
                     relevant_device = (
-                        not active_interfaces or interface in active_interfaces
+                        interface in active_interfaces or is_uplink_candidate(interface)
                     )
                     if not relevant_device:
                         continue
@@ -689,12 +699,24 @@ def log_analysis():
 
             recovered_episodes = []
             unresolved_episodes = []
-            for episode in episodes:
+            # Consume each proxy-start event at most once. A recovery must
+            # occur after the incident and before the next incident begins.
+            for index, episode in enumerate(episodes):
+                next_start = (
+                    episodes[index + 1]["first_time"]
+                    if index + 1 < len(episodes) else None
+                )
                 recovery = next(
-                    (item for item in success_events
-                     if episode["last_time"] is not None and item["time"] > episode["last_time"]),
+                    (
+                        item for item in success_events
+                        if episode["last_time"] is not None
+                        and item["time"] > episode["last_time"]
+                        and (next_start is None or item["time"] < next_start)
+                    ),
                     None
                 )
+                if recovery is not None:
+                    success_events.remove(recovery)
                 episode["recovery"] = recovery
                 if recovery and episode["first_time"] is not None:
                     episode["duration"] = (
